@@ -1,0 +1,80 @@
+name: Personal regular IPA package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package:
+    runs-on: macos-latest
+    env:
+      SOURCE_RUN_ID: '45748601163'
+      SOURCE_SHA256: 96ed9227f111375a33bc9d03624c92573ca6ff443d7cdeecf6d0081f5d053a7a
+      BASE_SHA256: bf70a75af0cba7bf4ead7cf68dc3c11e86d2a2a210ad31d4dd70f9953d97c625
+    steps:
+      - name: Checkout packaging scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Download our compiled source artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name EeveeSpotify-rootless-DEB --dir "$RUNNER_TEMP/eevee-source"
+          DEB="$RUNNER_TEMP/eevee-source/com.eevee.spotify_7.5.0_iphoneos-arm64.deb"
+          echo "$SOURCE_SHA256  $DEB" | shasum -a 256 -c -
+          echo "DEB_PATH=$DEB" >> "$GITHUB_ENV"
+
+      - name: Download and inspect the supplied base IPA
+        env:
+          BASE_IPA_URL: ${{ secrets.SPOTIFY_BASE_IPA_URL }}
+        run: |
+          test -n "$BASE_IPA_URL"
+          curl -fsSL --connect-timeout 30 --max-time 300 "$BASE_IPA_URL" -o "$RUNNER_TEMP/spotify-base.ipa"
+          mkdir -p Outputs/IPAS
+          python3 Tools/personal-ipa-check.py "$RUNNER_TEMP/spotify-base.ipa" \
+            --base --sha256 "$BASE_SHA256" --output Outputs/IPAS/base-inspection.json
+
+      - name: Install pinned upstream packaging tool
+        run: |
+          brew install dpkg ldid
+          python3 -m venv "$RUNNER_TEMP/cyan-venv"
+          "$RUNNER_TEMP/cyan-venv/bin/pip" install \
+            'git+https://github.com/asdfzxcvbn/pyzule-rw.git@740d3716dcd98c20c000f12cdb88f1f0b2a533a4'
+          echo "$RUNNER_TEMP/cyan-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Package the regular IPA using our compiled tweak
+        run: |
+          EXTRACT="$RUNNER_TEMP/eevee-deb"
+          mkdir -p "$EXTRACT"
+          dpkg-deb -x "$DEB_PATH" "$EXTRACT"
+          DYLIB=$(find "$EXTRACT" -name EeveeSpotify.dylib -type f | head -1)
+          FRAMEWORK=$(find "$EXTRACT" -name EeveeSwiftProtobuf.framework -type d | head -1)
+          BUNDLE=$(find "$EXTRACT" -name EeveeSpotify.bundle -type d | head -1)
+          test -n "$DYLIB" && test -n "$FRAMEWORK" && test -n "$BUNDLE"
+          cyan -i "$RUNNER_TEMP/spotify-base.ipa" \
+            -o Outputs/IPAS/EeveeSpotify-9.2.2-selfbuilt.ipa \
+            -f "$DYLIB" "$FRAMEWORK" "$BUNDLE" -c 9 -m 15.0 -du
+          bash Tools/strip-ipa.sh Outputs/IPAS/EeveeSpotify-9.2.2-selfbuilt.ipa
+
+      - name: Inspect output and record provenance
+        run: |
+          python3 Tools/personal-ipa-check.py Outputs/IPAS/EeveeSpotify-9.2.2-selfbuilt.ipa \
+            --output Outputs/IPAS/output-inspection.json
+          cp "$RUNNER_TEMP/eevee-source/build-provenance.txt" Outputs/IPAS/source-build-provenance.txt
+          git rev-parse HEAD > Outputs/IPAS/packaging-provenance.txt
+          echo 'cyan 740d3716dcd98c20c000f12cdb88f1f0b2a533a4' >> Outputs/IPAS/packaging-provenance.txt
+          shasum -a 256 Outputs/IPAS/*.ipa > Outputs/IPAS/SHA256SUMS.txt
+
+      - name: Upload personal IPA and inspection reports
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: EeveeSpotify-personal-IPA
+          path: Outputs/IPAS/*
+          retention-days: 1
+          if-no-files-found: error
