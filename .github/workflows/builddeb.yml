@@ -1,22 +1,10 @@
-name: Build rootless + RootHide .debs + Draft Release
+name: Personal Eevee source build
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Git tag to create/use for the draft release (e.g. v6.6.3.1)"
-        required: true
-        default: "v6.6.3.1"
-      release_name:
-        description: "Release title (optional)"
-        required: false
-        default: ""
-      prerelease:
-        description: "Mark as prerelease"
-        required: true
-        default: "false"
-        type: choice
-        options: ["false", "true"]
+
+permissions:
+  contents: read
 
 env:
   SWIFTPROTOBUF_VERSION: "1.29.0"
@@ -32,9 +20,6 @@ jobs:
           - scheme: rootless
             label: rootless
             theos_repository: theos/theos
-          - scheme: roothide
-            label: RootHide
-            theos_repository: roothide/theos
 
     env:
       THEOS: ${{ github.workspace }}/theos
@@ -42,19 +27,22 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Setup Xcode
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90
         with:
-          xcode-version: "26.3.0"
+          xcode-version: 'latest-stable'
 
       - name: Checkout ${{ matrix.label }} Theos
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ${{ matrix.theos_repository }}
+          ref: 8167f59de02fd32cf45b16bfcb1330dfa5c9974c
+          persist-credentials: false
           path: ${{ github.workspace }}/theos
           submodules: recursive
 
@@ -62,6 +50,15 @@ jobs:
         run: |
           brew install make dpkg ldid
           echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Record build provenance
+        run: |
+          mkdir -p Outputs/DEBS
+          git rev-parse HEAD > Outputs/DEBS/build-provenance.txt
+          git -C "$THEOS" rev-parse HEAD >> Outputs/DEBS/build-provenance.txt
+          git -C "$THEOS" submodule status --recursive >> Outputs/DEBS/build-provenance.txt
+          xcodebuild -version >> Outputs/DEBS/build-provenance.txt
+          swift --version >> Outputs/DEBS/build-provenance.txt
 
       - name: Build EeveeSwiftProtobuf.framework
         run: make build-eeveeswiftprotobuf
@@ -105,7 +102,8 @@ jobs:
 
       - name: Build ${{ matrix.label }} .deb
         env:
-          REPO_SLUG: ${{ github.repository }}
+          REPO_SLUG: SideloadLabs/EeveeSpotifyReincarnated
+          BRANCH_NAME: f0b296b67d7de418409a680cee4f003d1a167720
         run: |
           make clean || true
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME="${{ matrix.scheme }}"
@@ -154,33 +152,14 @@ jobs:
             [ "$(dpkg-deb -f "$DEB_PATH" Architecture)" = "iphoneos-arm64e" ]
           fi
 
+      - name: Record package checksums
+        run: |
+          shasum -a 256 Outputs/DEBS/*.deb > Outputs/DEBS/SHA256SUMS.txt
+
       - name: Upload ${{ matrix.label }} artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: EeveeSpotify-${{ matrix.label }}-DEB
-          path: Outputs/DEBS/*.deb
+          path: Outputs/DEBS/*
+          retention-days: 7
           if-no-files-found: error
-
-  draft-release:
-    name: Create draft release
-    needs: build-debs
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download both packages
-        uses: actions/download-artifact@v4
-        with:
-          pattern: EeveeSpotify-*-DEB
-          path: Outputs/DEBS
-          merge-multiple: true
-
-      - name: Draft GitHub Release and attach both .debs
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ inputs.tag }}
-          target_commitish: ${{ github.sha }}
-          name: ${{ inputs.release_name != '' && inputs.release_name || inputs.tag }}
-          draft: true
-          prerelease: ${{ inputs.prerelease == 'true' }}
-          files: Outputs/DEBS/*.deb
